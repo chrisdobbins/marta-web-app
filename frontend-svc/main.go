@@ -11,11 +11,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang/geo/s1"
+	"github.com/golang/geo/s2"
 	log "github.com/sirupsen/logrus"
 )
 
 var cache RTBusCache
 var cacheLock sync.RWMutex
+var cacheRefreshInterval = time.Minute
 var backendSvcURL string
 var defaultReqTimeout = 500 * time.Millisecond
 
@@ -95,9 +98,10 @@ func main() {
 			log.Errorf("failed to get closest stops: %s", err.Error())
 			c.JSON(500, gin.H{"error": "failed to get closest stops"})
 		}
+
+		// we successfully got closest stops, pick one for now and find routes that serve it
 		stop := closestStops[0]
 		fmt.Println("stops:", closestStops)
-		// we successfully got closest stops, pick one for now and find routes that serve it
 		routesCtx, routesCtxCancel := context.WithTimeout(c, defaultReqTimeout)
 		defer routesCtxCancel()
 		routesForStop, err := getRoutesForStop(routesCtx, stop.ID)
@@ -105,19 +109,26 @@ func main() {
 			log.Errorf("failed to get routes for stop %d: %s", stop.ID, err.Error())
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to get routes for stop %d", stop.ID)})
 		}
-		// then, find buses for those routes in the cache
+		// then, find buses in the cache for those routes
 		realtimeBusesForRoute := []RTBus{}
 		for _, route := range routesForStop {
 			fmt.Println("route:", route)
 			cacheLock.RLock()
-			fmt.Println(fmt.Sprintf("routes for stop %d: %+v", stop.ID, cache[route.ShortName]))
+			fmt.Println(fmt.Sprintf("realtime buses serving stop %d: %+v", stop.ID, cache[route.ShortName]))
 			if rtBuses, ok := cache[route.ShortName]; ok {
 				realtimeBusesForRoute = append(realtimeBusesForRoute, rtBuses...)
 			}
 			cacheLock.RUnlock()
 		}
+		fmt.Println("num")
+		radiusInMiles := .5
 		// finally, get buses within a 5mi radius
-
+		busesInRadius, err := getBusesWithinRadius(realtimeBusesForRoute, radiusInMiles, parsedLat, parsedLon)
+		if err != nil {
+			log.Errorf("failed to get buses within radius: %s", err.Error())
+			c.JSON(500, gin.H{"error": "failed to get buses within radius"})
+		}
+		fmt.Println("buses in .5 mi radius:", busesInRadius)
 		c.JSON(200, gin.H{"msg": "placeholder"})
 	})
 
@@ -159,38 +170,38 @@ func getRoutesForStop(ctx context.Context, stopId int) ([]Route, error) {
 	return decodedResp.Routes, err
 }
 
-// func getBusesWithinRadius(radius, lat, lon float64)([]RTBus, error){
-// 	defaultGeoLevel := 12 // 3.31km^2 - 6.38km^2
-// 	earthRadiusKm := 6371.01
-// 	// latlong := s2.LatLngFromDegrees(point.Latitude, point.Longitude)
-// 	// s2Point := s2.PointFromLatLng(latlong)
-// 	// angle := s1.Angle(radius / EarthRadiusInMeter)
-// 	// sphereCap := s2.CapFromCenterAngle(s2Point, angle)
-// 	// region := s2.Region(sphereCap)
-// 	// rc := &s2.RegionCoverer{MaxLevel: config.S2Level(), MinLevel: config.S2Level()}
-// 	// cellUnion := rc.Covering(region)
-
-// 	// var stringCellIDs []string
-// 	// for _, cellID := range cellUnion {
-// 	// 	stringCellIDs = append(stringCellIDs, strconv.FormatUint(uint64(cellID), 10))
-// 	// }
-// 	// return stringCellIDs
-// 	latLong := s2.LatLngFromDegrees(lat, lon)
-// 	point := s2.PointFromLatLng(latLong)
-// 	// convert radius to km
-// 	kmRadius := 1.61*radius
-// 	angle := s1.Angle(kmRadius/earthRadiusKm)
-// 	sphereCap := s2.CapFromCenterAngle(point, angle)
-// 	region := s2.Region(sphereCap)
-// 	regionCoverer := &s2.RegionCoverer{
-// 		MaxLevel: defaultGeoLevel,
-// 		MinLevel: defaultGeoLevel,
-// 	}
-// 	cellUnion := regionCoverer.Covering(region)
-// 	for _, cellID := range cellUnion {
-
-// 	}
-// }
+func getBusesWithinRadius(buses []RTBus, radius, lat, lon float64) ([]RTBus, error) {
+	defaultGeoLevel := 12 // 3.31km^2 - 6.38km^2
+	earthRadiusKm := 6371.01
+	latLong := s2.LatLngFromDegrees(lat, lon)
+	point := s2.PointFromLatLng(latLong)
+	kmRadius := 1.61 * radius
+	angle := s1.Angle(kmRadius / earthRadiusKm)
+	sphereCap := s2.CapFromCenterAngle(point, angle)
+	region := s2.Region(sphereCap)
+	regionCoverer := &s2.RegionCoverer{
+		MaxLevel: defaultGeoLevel,
+		MinLevel: defaultGeoLevel,
+	}
+	busesInRadius := []RTBus{}
+	cellUnion := regionCoverer.Covering(region)
+	for _, cellID := range cellUnion {
+		c := s2.CellFromCellID(cellID)
+		loop := s2.LoopFromCell(c)
+		for _, bus := range buses {
+			// TODO: change Latitude field to float
+			// so that this isn't necessary here
+			parsedLat, _ := strconv.ParseFloat(bus.Latitude, 64)
+			parsedLon, _ := strconv.ParseFloat(bus.Longitude, 64)
+			busLL := s2.LatLngFromDegrees(parsedLat, parsedLon)
+			busPt := s2.PointFromLatLng(busLL)
+			if loop.ContainsPoint(busPt) {
+				busesInRadius = append(busesInRadius, bus)
+			}
+		}
+	}
+	return busesInRadius, nil
+}
 
 type Stop struct {
 	Lat  string `json:"lat"`
@@ -247,7 +258,7 @@ type RTBusCache map[string][]RTBus
 func cacheAllBuses(ctx context.Context) {
 	initialExponentialDelay := 500 * time.Millisecond
 	var numOfFailedAttempts int
-	delay := time.Minute
+	delay := cacheRefreshInterval
 	for {
 		select {
 		case <-ctx.Done():
