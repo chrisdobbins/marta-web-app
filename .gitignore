@@ -1,0 +1,2 @@
+backend-svc/venv/*
+backend-svc/__pycache__/*
