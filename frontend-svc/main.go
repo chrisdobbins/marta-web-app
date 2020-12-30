@@ -120,19 +120,20 @@ func main() {
 			}
 			cacheLock.RUnlock()
 		}
-		fmt.Println("num")
+		fmt.Println("num of realtime buses:", len(realtimeBusesForRoute))
 		radiusInMiles := .5
-		// finally, get buses within a 5mi radius
+		// finally, get buses within the radius
 		busesInRadius, err := getBusesWithinRadius(realtimeBusesForRoute, radiusInMiles, parsedLat, parsedLon)
 		if err != nil {
 			log.Errorf("failed to get buses within radius: %s", err.Error())
 			c.JSON(500, gin.H{"error": "failed to get buses within radius"})
 		}
-		fmt.Println("buses in .5 mi radius:", busesInRadius)
-		c.JSON(200, gin.H{"msg": "placeholder"})
+		fmt.Println("number of buses in radius:", len(busesInRadius))
+		fmt.Println(fmt.Sprintf("buses in %f mi radius: %+v", radiusInMiles, busesInRadius))
+		c.JSON(200, gin.H{"closestBuses": busesInRadius})
 	})
 
-	r.Run() // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
+	r.Run()
 }
 
 type Route struct {
