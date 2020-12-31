@@ -30,28 +30,9 @@ def setup():
   conn_pool = pool.ThreadedConnectionPool(1, 15, user=pg_db_user, password=pg_pw, host=pg_host, port=pg_port, database=pg_db)
   if not conn_pool:
     exit(2)
-
   atexit.register(cleanup)
+
   
-def cleanup():
-  if conn_pool is not None:
-    conn_pool.closeall()
-
-def convert_to_float(num):
-  try:
-    float(num)
-    return float(num)
-  except ValueError:
-    return None
-
-def convert_to_int(num):
-  try:
-    n = int(num)
-    return n
-  except ValueError:
-    print('error converting to int')
-    return None
-
 @app.route('/routesforstop', methods=['GET'])
 def routes_for_stop():
   resp = {'routes': [], 'error': ''}
@@ -99,9 +80,6 @@ def closest_stops_route():
     resp['error'] = 'Bad longitude value; got: '+str(request.args['lon'])
     return resp, status.HTTP_400_BAD_REQUEST
 
- # print(user_lat)
- # print(user_lon)
-
   pg_conn = conn_pool.getconn()
   if pg_conn is None:
     resp['error'] = 'Unable to get DB connection'
@@ -121,11 +99,31 @@ def closest_stops_route():
     stop_lat = row[2]
     stop_lon = row[3]
     resp['stops'].append({'id': stop_id, 'name': stop_name, 'lat': stop_lat, 'lon': stop_lon})
-#    print(stop_name)
-  
+
   return resp, status.HTTP_200_OK
-    
+
+def cleanup():
+  if conn_pool is not None:
+    conn_pool.closeall()
+
+def convert_to_float(num):
+  try:
+    float(num)
+    return float(num)
+  except ValueError:
+    return None
+
+def convert_to_int(num):
+  try:
+    n = int(num)
+    return n
+  except ValueError:
+    print('error converting to int')
+    return None
+
+   
 if __name__ == "__main__":
     setup()
     app.run(debug=True)
+
 
