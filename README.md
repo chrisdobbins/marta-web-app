@@ -3,7 +3,6 @@ The front-end service will handle all interactions with the UI (index.html). It 
 The front-end service currently exposes two endpoints:
 - `/closeststops`
   - This returns the 5 closest stops to a given `lat` and `lon`, which are passed as query string parameters
-
 - `/closestbuses`
   - This returns all buses that are within a .5 mi radius that meet the following conditions:
     - They serve the closest stop to a given `lat` and `lon` (passed as query string parameters)
@@ -18,7 +17,7 @@ It currently exposes two endpoints:
 
 ## TODOs
 - Add tests
-- Clean up comments
+- Clean up comments and code
 - Add an endpoint that returns an ordered list of all stops served by a route's trip
 - Integrate the front-end service with the UI
 - Deploy it somewhere TBD
