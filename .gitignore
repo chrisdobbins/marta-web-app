@@ -1,3 +1,5 @@
 backend-svc/.venv/*
 backend-svc/__pycache__/*
+backend-svc/.credentials
 .vscode/*
+

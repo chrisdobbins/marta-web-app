@@ -43,20 +43,24 @@ func main() {
 		lat := c.Query("lat")
 		if len(lat) == 0 {
 			c.JSON(400, gin.H{"error": "no latitude provided"})
+			return
 		}
 		parsedLat, err := strconv.ParseFloat(lat, 64)
 		if err != nil {
 			log.Errorf("failed to parse latitude: %s", err.Error())
 			c.JSON(400, gin.H{"error": fmt.Sprintf("bad latitude provided, got %v", lat)})
+			return
 		}
 		lon := c.Query("lon")
 		if len(lon) == 0 {
 			c.JSON(400, gin.H{"error": "no longitude provided"})
+			return
 		}
 		parsedLon, err := strconv.ParseFloat(lon, 64)
 		if err != nil {
 			log.Errorf("failed to parse longitude: %s", err.Error())
 			c.JSON(400, gin.H{"error": fmt.Sprintf("bad longitude provided, got %v", lon)})
+			return
 		}
 		ctx, cancel := context.WithTimeout(c, defaultReqTimeout)
 		defer cancel()
@@ -64,51 +68,76 @@ func main() {
 		if err != nil {
 			log.Errorf("getClosestStops request failed: %s", err.Error())
 			c.JSON(500, gin.H{"error": "failed to get closest stops"})
+			return
 		}
 
 		c.JSON(200, gin.H{"stops": stops})
 	})
 
 	r.GET("/closestbuses", func(c *gin.Context) {
-		lat := c.Query("lat")
-		if len(lat) == 0 {
-			c.JSON(400, gin.H{"error": "no latitude provided"})
-		}
-		parsedLat, err := strconv.ParseFloat(lat, 64)
-		if err != nil {
-			log.Errorf("failed to parse latitude: %s", err.Error())
-			c.JSON(400, gin.H{"error": fmt.Sprintf("bad latitude provided, got %v", lat)})
-		}
-		lon := c.Query("lon")
-		if len(lon) == 0 {
-			c.JSON(400, gin.H{"error": "no longitude provided"})
-		}
-		parsedLon, err := strconv.ParseFloat(lon, 64)
-		if err != nil {
-			log.Errorf("failed to parse longitude: %s", err.Error())
-			c.JSON(400, gin.H{"error": fmt.Sprintf("bad longitude provided, got %v", lon)})
-		}
+		// prefer stopID query param; take lat/lon
+		// as fallback
+		var stop Stop
+		var lat, lon float64
+		stopID := c.Query("stopid")
+		if len(stopID) > 0 {
+			ctx, cancel := context.WithTimeout(c, defaultReqTimeout)
+			defer cancel()
+			var err error
+			stop, err = getStopInfo(ctx, stopID)
+			if err != nil {
+				log.Errorf("failed to get stop info: %s", err.Error())
+				c.JSON(500, gin.H{"error": fmt.Sprintf("unable to get stop info for %+v", stopID)})
+				return
+			}
+			lat, _ = strconv.ParseFloat(stop.Lat, 64)
+			lon, _ = strconv.ParseFloat(stop.Lon, 64)
+		} else {
+			queryLat := c.Query("lat")
+			queryLon := c.Query("lon")
+			if len(queryLat) == 0 || len(queryLon) == 0 {
+				c.JSON(400, gin.H{"error": "missing location data (stop ID or lat/lon) is missing"})
+				return
+			}
+			var err error
+			lat, err = strconv.ParseFloat(queryLat, 64)
+			if err != nil {
+				log.Errorf("failed to parse latitude: %s", err.Error())
+				c.JSON(400, gin.H{"error": fmt.Sprintf("bad latitude provided, got %v", lat)})
+				return
+			}
+			lon, err = strconv.ParseFloat(queryLon, 64)
+			if err != nil {
+				log.Errorf("failed to parse longitude: %s", err.Error())
+				c.JSON(400, gin.H{"error": fmt.Sprintf("bad longitude provided, got %v", lon)})
+				return
+			}
 
-		// call getClosestStops
-		stopsCtx, stopsCtxCancel := context.WithTimeout(c, defaultReqTimeout)
-		defer stopsCtxCancel()
+			// call getClosestStops
+			stopsCtx, stopsCtxCancel := context.WithTimeout(c, defaultReqTimeout)
+			defer stopsCtxCancel()
 
-		closestStops, err := getClosestStops(stopsCtx, parsedLat, parsedLon)
-		if err != nil {
-			log.Errorf("failed to get closest stops: %s", err.Error())
-			c.JSON(500, gin.H{"error": "failed to get closest stops"})
+			closestStops, err := getClosestStops(stopsCtx, lat, lon)
+			if err != nil {
+				log.Errorf("failed to get closest stops: %s", err.Error())
+				c.JSON(500, gin.H{"error": "failed to get closest stops"})
+				return
+			}
+
+			// we successfully got closest stops, pick one for now and find routes that serve it
+			stop = closestStops[0]
+			fmt.Println("lat/lon qparam stop:", stop)
 		}
-
-		// we successfully got closest stops, pick one for now and find routes that serve it
-		stop := closestStops[0]
-		fmt.Println("stops:", closestStops)
+		fmt.Println(cache["186"])
 		routesCtx, routesCtxCancel := context.WithTimeout(c, defaultReqTimeout)
 		defer routesCtxCancel()
 		routesForStop, err := getRoutesForStop(routesCtx, stop.ID)
 		if err != nil {
 			log.Errorf("failed to get routes for stop %d: %s", stop.ID, err.Error())
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to get routes for stop %d", stop.ID)})
+			return
 		}
+		fmt.Println("routesForStop:", routesForStop)
 		// then, find buses in the cache for those routes
 		realtimeBusesForRoute := []RTBus{}
 		for _, route := range routesForStop {
@@ -123,10 +152,11 @@ func main() {
 		fmt.Println("num of realtime buses:", len(realtimeBusesForRoute))
 		radiusInMiles := .5
 		// finally, get buses within the radius
-		busesInRadius, err := getBusesWithinRadius(realtimeBusesForRoute, radiusInMiles, parsedLat, parsedLon)
+		busesInRadius, err := getBusesWithinRadius(realtimeBusesForRoute, radiusInMiles, lat, lon)
 		if err != nil {
 			log.Errorf("failed to get buses within radius: %s", err.Error())
 			c.JSON(500, gin.H{"error": "failed to get buses within radius"})
+			return
 		}
 		fmt.Println("number of buses in radius:", len(busesInRadius))
 		fmt.Println(fmt.Sprintf("buses in %f mi radius: %+v", radiusInMiles, busesInRadius))
@@ -137,8 +167,8 @@ func main() {
 }
 
 type Route struct {
-	ShortName string `json:"routeShortName"`
-	LongName  string `json:"routeLongName"`
+	ShortName string `json:"shortName"`
+	LongName  string `json:"longName"`
 }
 
 type RoutesForStopResp struct {
@@ -146,9 +176,9 @@ type RoutesForStopResp struct {
 	Error  string  `json:"error"`
 }
 
-func getRoutesForStop(ctx context.Context, stopId int) ([]Route, error) {
+func getRoutesForStop(ctx context.Context, stopID int) ([]Route, error) {
 	var decodedResp RoutesForStopResp
-	fullURL := fmt.Sprintf(backendSvcURL+"/routesforstop?id=%d", stopId)
+	fullURL := fmt.Sprintf(backendSvcURL+"/routesforstop?id=%d", stopID)
 	ctx, cancel := context.WithTimeout(ctx, defaultReqTimeout)
 	defer cancel()
 	req, err := http.NewRequest("GET", fullURL, nil)
@@ -168,6 +198,7 @@ func getRoutesForStop(ctx context.Context, stopId int) ([]Route, error) {
 	if len(decodedResp.Error) > 0 {
 		return []Route{}, errors.New(decodedResp.Error)
 	}
+	fmt.Println(decodedResp)
 	return decodedResp.Routes, err
 }
 
@@ -205,14 +236,45 @@ func getBusesWithinRadius(buses []RTBus, radius, lat, lon float64) ([]RTBus, err
 }
 
 type Stop struct {
-	Lat  string `json:"lat"`
-	Lon  string `json:"lon"`
-	ID   int    `json:"id"`
-	Name string `json:"name"`
+	Lat    string  `json:"lat"`
+	Lon    string  `json:"lon"`
+	ID     int     `json:"id"`
+	Name   string  `json:"name"`
+	Routes []Route `json:"routes"`
 }
 type StopsResp struct {
 	Error string `json:"error"`
 	Stops []Stop `json:"stops"`
+}
+
+type StopResp struct {
+	Error string
+	Stop  Stop
+}
+
+func getStopInfo(ctx context.Context, id string) (Stop, error) {
+	var decodedResp StopResp
+	fullURL := backendSvcURL + "/stop?id=" + id
+	ctx, cancel := context.WithTimeout(ctx, defaultReqTimeout)
+	defer cancel()
+	req, err := http.NewRequest("GET", fullURL, nil)
+	if err != nil {
+		log.Errorf("error creating request object: %s", err.Error())
+		return Stop{}, err
+	}
+	req = req.WithContext(ctx)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return Stop{}, err
+	}
+	err = json.NewDecoder(resp.Body).Decode(&decodedResp.Stop)
+	if err != nil {
+		return Stop{}, err
+	}
+	if len(decodedResp.Error) > 0 {
+		return Stop{}, errors.New(decodedResp.Error)
+	}
+	return decodedResp.Stop, err
 }
 
 func getClosestStops(ctx context.Context, lat, lon float64) ([]Stop, error) {
