@@ -240,7 +240,7 @@ type Stop struct {
 	Lon    string  `json:"lon"`
 	ID     int     `json:"id"`
 	Name   string  `json:"name"`
-	Routes []Route `json:"routes"`
+	Routes []Route `json:"routes"` // routes that serve this stop
 }
 type StopsResp struct {
 	Error string `json:"error"`

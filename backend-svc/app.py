@@ -3,6 +3,8 @@ from flask_api import FlaskAPI, status, exceptions
 from psycopg2 import pool
 import os
 import atexit
+from neo4j import GraphDatabase
+import neo4j
 
 app = FlaskAPI(__name__)
 
@@ -32,17 +34,64 @@ def setup():
                              WHERE st.stop_id IN %(stop_ids)s
                              ORDER BY st.stop_id
                              """
+  global path_between_stops_query
+  path_between_stops_query = """MATCH (start:Stop{id: $start_id}) MATCH (end:Stop{id: $end_id}) call apoc.path.expandConfig(start, {relationshipFilter: "NEXT>|LOCATED", endNodes: [end], uniqueness: "NODE_GLOBAL"}) yield path with path limit 1 return nodes(path);
+"""
+  # DB setup
   global conn_pool
   pg_db_user = os.environ.get('PG_USER')
   pg_pw = os.environ.get('PG_PW')
   pg_host = os.environ.get('PG_HOST')
   pg_port = os.environ.get('PG_PORT')
   pg_db = os.environ.get('PG_DB')
-  
   conn_pool = pool.ThreadedConnectionPool(1, 15, user=pg_db_user, password=pg_pw, host=pg_host, port=pg_port, database=pg_db)
   if not conn_pool:
     exit(2)
+  neo4j_uri = os.environ.get('NEO_URI')
+  neo4j_pw = os.environ.get('NEO_PW')
+  neo4j_user = os.environ.get('NEO_USER')
+  global neo4j_driver
+  neo4j_driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_pw))
   atexit.register(cleanup)
+
+@app.route('/path', methods=['GET'])
+def path():
+  resp = {'trips': [], 'error': ''}
+  if 'start' not in request.args:
+    resp['error'] = 'Missing starting stop ID'
+    return resp, status.HTTP_400_BAD_REQUEST
+  if 'end' not in request.args:
+    resp['error'] = 'Missing ending stop ID'
+    return resp, status.HTTP_400_BAD_REQUEST
+  starting_stop_id = convert_to_int(request.args['start'])
+  if starting_stop_id is None:
+    resp['error'] = 'Invalid starting stop ID, got '+request.args['start']
+    return resp, status.HTTP_400_BAD_REQUEST
+  ending_stop_id = convert_to_int(request.args['end'])
+  if ending_stop_id is None:
+    resp['error'] = 'Invalid ending stop ID, got '+request.args['end']
+    return resp, status.HTTP_400_BAD_REQUEST
+  full_path = []
+  transfers = []
+  with neo4j_driver.session(default_access_mode=neo4j.READ_ACCESS) as session:
+    result = session.run(path_between_stops_query, start_id=starting_stop_id, end_id=ending_stop_id)
+    for record in result:
+      trip = {'legs': [], 'transfers': []}
+      for idx, nodes in enumerate(record.values()):
+        leg = []
+        for inner_idx, node in enumerate(nodes):
+          if 'StopForRoute' in node.labels:
+            leg.append({'stopId': node.get('stopId'), 'stopName': node.get('stopName'), 'routeShortName': node.get('routeShortName'), 'sequenceNum': node.get('sequenceNum'), 'lon': node.get('stopLon'), 'lat': node.get('stopLat')})
+          else:
+            if len(leg) > 0:
+                full_path.append(leg)
+                leg = []
+                if inner_idx != len(nodes)-1:
+                    transfers.append({'stopId': node.get('id')})
+  trip['legs'] = full_path
+  trip['transfers'] = transfers
+  resp['trips'].append(trip)
+  return resp, status.HTTP_200_OK
 
 @app.route('/stop', methods=['GET'])
 def stop():
@@ -150,6 +199,7 @@ def closest_stops_route():
 def cleanup():
   if conn_pool is not None:
     conn_pool.closeall()
+  neo4j_driver.close()
 
 def convert_to_float(num):
   try:
